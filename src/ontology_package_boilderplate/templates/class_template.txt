@@ -1,0 +1,71 @@
+"""
+
+Class template provided by ontology-package-boilerplate.
+Extracted from: $ontology_file_path at $current_datetime
+
+"""
+
+import sys
+import importlib
+
+$parent_imports
+$property_imports
+
+from ontology import onto
+from uuid import uuid4
+
+
+class $class_name($base_class):
+    """
+    $docs
+    """
+
+    equivalent_to = $equivalent_to
+
+    isDefinedBy = $isDefinedBy
+
+    required_modules = []
+
+    def _check_required_modules(self):
+        """
+        Check that required modules are installed for this class to run.
+
+        NOTE: It might be necessary to separate required modules by whether
+        they are required to initialize or only required to __call__
+        """
+        for module in self.required_modules:
+            if module not in sys.modules:
+                try:
+                    _ = importlib.import_module(module)
+                except ModuleNotFoundError as e:
+                    print(
+                        f"Class: {type(self)} requires module: {module} to be installed"
+                    )
+                    raise e
+
+    @classmethod
+    def create(cls, identifier: str | None = None, **kwargs):
+        """
+        Create a new instance of the class, slightly different from typical __init__
+        as it populates some properties.
+        """
+
+        if identifier is None:
+            identifier = uuid4().hex[:24]
+
+        new_cls = cls(identifier, **kwargs)
+
+        cls.assertion(new_cls)
+
+        return new_cls
+
+    @classmethod
+    def construct(cls, identifier: str | None = None, **kwargs):
+        """
+        This method may be used as an intermediary to "create" when there is a
+        way to build the class from some base type.
+
+        For example, a FeatureCollection (which requires creation of FeatureCollection, Feature, and Geometry)
+        can be "construct"-ed from a dictionary containing a GeoJSON of the FeatureCollection.
+        """
+        return cls.create(identifier, **kwargs)
