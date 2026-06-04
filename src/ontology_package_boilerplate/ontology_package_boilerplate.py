@@ -9,146 +9,195 @@ import os
 import re
 import shutil
 from argparse import ArgumentParser
+from collections import namedtuple
 from string import Template
 
-import owlready2
+from rdflib import BNode, Graph
+from rdflib.namespace import OWL, RDF, RDFS
 from tqdm import tqdm
 
-from base_class.base_class import NewThing
+from .base_class import Thing
 
-
-def make_file_name(cls, label_property):
-    class_label = getattr(cls, label_property, None)
-    if isinstance(class_label, list):
-        if len(class_label) > 0:
-            class_label = class_label[0]
-        else:
-            # Backup label property is name
-            class_label = cls.name
-    elif class_label is None:
-        class_label = cls.name
-
-    cls_file_name = re.sub(r"\W+", "_", str(class_label))
-
-    return cls_file_name
-
-
-def make_class_file(
-    cls, filepath, base_class, template, label_property, ontology_filepath, mode
-):
-
-    # Skipping RDF/S Classes
-    if cls.name in ["Class", "Datatype", "Literal", "Property"]:
-        return
-
-    parent_imports = f"from ..{make_file_name(base_class, label_property)} import {make_file_name(base_class, label_property)}"
-
-    cls_dict = {
-        "ontology_file_path": ontology_filepath,
-        "current_datetime": datetime.datetime.now(),
-        "parent_imports": parent_imports,
-        "property_imports": "",
-        "class_name": make_file_name(cls, label_property),
-        "base_class": str(make_file_name(base_class, label_property)),
-        "docs": str(cls.isDefinedBy[0]) if len(cls.isDefinedBy) > 0 else "",
-        "isDefinedBy": str(cls.isDefinedBy),
-        "equivalent_to": f"[onto.get_namespace('{cls.namespace.base_iri}').{cls.name}]",
-    }
-
-    class_file = template.substitute(cls_dict)
-    with open(filepath + ".py", mode) as f:
-        f.write(class_file)
-        f.close()
-
-
-def make_class_dir(cls, filepath, clean):
-    class_dir_path = os.path.join(filepath)
-    if not os.path.exists(class_dir_path):
-        os.makedirs(class_dir_path)
-    else:
-        if clean:
-            shutil.rmtree(class_dir_path)
-            os.makedirs(class_dir_path)
-
-    init_path = os.path.join(class_dir_path, "__init__.py")
-    if not os.path.exists(init_path) or clean:
-        open(init_path, "w")
+URI_REGEX_SPLIT = r"[^a-zA-Z\d\s:_]"
 
 
 def traverse_subclass(
     cls,
-    dir_function,
-    file_function,
+    class_maker,
     base_class,
     filepath,
     clean,
-    template,
-    label_property,
-    ontology_filepath,
 ):
+    cls_object = class_maker.make_class_object(cls)
+    cls_name = cls_object.filename
 
-    cls_name = make_file_name(cls, label_property)
     filepath += os.sep + cls_name
-    if len(list(cls.subclasses())) > 0:
-        dir_function(cls, filepath, clean)
-        file_function(
-            cls,
+    if len(cls_object.subclasses) > 0:
+        class_maker.make_class_dir(filepath, clean)
+        class_maker.make_class_file(
+            cls_object,
             filepath + os.sep + cls_name,
             base_class,
-            template,
-            label_property,
-            ontology_filepath,
             "w",
         )
-        for subcls in cls.subclasses():
-            if len(list(subcls.subclasses())) > 0:
+        for subcls in cls_object.subclasses:
+            subcls_object = class_maker.make_class_object(subcls)
+            if len(subcls_object.subclasses) > 0:
                 traverse_subclass(
                     subcls,
-                    dir_function,
-                    file_function,
-                    cls,
+                    class_maker,
+                    cls_object,
                     filepath,
                     clean,
-                    template,
-                    label_property,
-                    ontology_filepath,
                 )
             else:
-                append_template = Template(
-                    "\n".join(template.template.splitlines()[19:] + ["", "", ""])
-                )
-                file_function(
-                    subcls,
+                class_maker.make_class_file(
+                    subcls_object,
                     filepath + os.sep + cls_name,
-                    cls,
-                    append_template,
-                    label_property,
-                    ontology_filepath,
+                    cls_object,
                     "a",
                 )
     else:
         # If the path exists but clean is true, make the file,
         # If the path does not exist, make the file regardless of clean
         if not os.path.exists(filepath) or clean:
-            file_function(
-                cls,
+            class_maker.make_class_file(
+                cls_object,
                 filepath,
                 base_class,
-                template,
-                label_property,
-                ontology_filepath,
                 "w",
             )
+
+
+ClassObject = namedtuple(
+    "ClassObject", ["uri", "name", "filename", "subclasses", "label", "isDefinedBy"]
+)
+
+
+class ClassObjectMaker(Graph):
+    def __init__(
+        self, ontology_filepath, destination_path, class_template, class_name_property
+    ):
+        super().__init__()
+        self.ontology_filepath = ontology_filepath
+        self.destination_path = destination_path
+        self.class_template = class_template
+        self.class_name_property = class_name_property
+
+        self.parse(self.ontology_filepath)
+
+    def get_base_classes(self, scope=[]):
+
+        base_classes = []
+        if len(scope) == 0:
+            # With no specified scope, find classes which are not the subclass of anything
+            if (
+                len(list(self.subjects(predicate=RDFS.subClassOf, object=OWL.Thing)))
+                > 0
+            ):
+                # Or subclasses of OWL:Thing
+                base_classes = list(
+                    self.subjects(predicate=RDFS.subClassOf, object=OWL.Thing)
+                )
+            else:
+                for cls in self.subjects(predicate=RDF.type, object=OWL.Class):
+                    if not isinstance(cls, BNode) and not cls == OWL.Restriction:
+                        bases = list(
+                            self.objects(subject=cls, predicate=RDFS.subClassOf)
+                        )
+                        if len(bases) == 0:
+                            eq_to = list(
+                                self.objects(subject=cls, predicate=OWL.equivalentClass)
+                            )
+                            if len(eq_to) == 0:
+                                base_classes.append(cls)
+
+        else:
+            base_classes = scope
+
+        return base_classes
+
+    def make_class_object(self, uri):
+        attrs = {}
+        for prop in [RDFS.label, RDFS.isDefinedBy]:
+            value = list(self.objects(subject=uri, predicate=prop))
+            prop_name = re.split(URI_REGEX_SPLIT, str(prop))[-1]
+            attrs[prop_name] = value
+
+        cls_name = self.value(subject=uri, predicate=self.class_name_property)
+        if cls_name is None:
+            cls_name = re.split(URI_REGEX_SPLIT, (uri))[-1]
+
+        subclasses = list(self.subjects(predicate=RDFS.subClassOf, object=uri))
+
+        cls_obj = ClassObject(
+            uri=uri,
+            name=cls_name,
+            filename=self.make_file_name(cls_name),
+            label=attrs.get("label"),
+            isDefinedBy=attrs.get("isDefinedBy"),
+            subclasses=subclasses,
+        )
+
+        return cls_obj
+
+    def make_file_name(self, cls_name):
+        cls_file_name = re.sub(r"\W+", "_", str(cls_name))
+        return cls_file_name
+
+    def make_class_dir(self, filepath, clean):
+        class_dir_path = os.path.join(filepath)
+        if not os.path.exists(class_dir_path):
+            os.makedirs(class_dir_path)
+        else:
+            if clean:
+                shutil.rmtree(class_dir_path)
+                os.makedirs(class_dir_path)
+
+        init_path = os.path.join(class_dir_path, "__init__.py")
+        if not os.path.exists(init_path) or clean:
+            open(init_path, "w")
+
+    def make_class_file(self, cls_object, filepath, base_class, mode):
+        # Skipping RDF/S Classes
+        if cls_object.name in ["Class", "Datatype", "Literal", "Property"]:
+            return
+
+        parent_imports = f"from ..{base_class.filename} import {base_class.filename}"
+
+        cls_dict = {
+            "ontology_file_path": self.ontology_filepath,
+            "current_datetime": datetime.datetime.now(),
+            "parent_imports": parent_imports,
+            "property_imports": "",
+            "class_name": cls_object.name,
+            "base_class": base_class.name,
+            "docs": str(cls_object.isDefinedBy),
+            "isDefinedBy": str(cls_object.isDefinedBy),
+        }
+
+        if mode == "w":
+            template = self.class_template
+        else:
+            template = Template(
+                "\n".join(self.class_template.template.splitlines()[13:] + ["", "", ""])
+            )
+
+        cls_file = template.substitute(cls_dict)
+        with open(filepath + ".py", mode) as f:
+            f.write(cls_file)
+            f.close()
 
 
 def create(
     ontology_filepath: str,
     destination_path: str,
-    scope: list | None = None,
+    base_class_obj=Thing,
+    scope: list = [],
     class_template: str = os.path.join(
         os.path.dirname(__file__), "templates", "class_template.txt"
     ),
-    class_name_property: str = "label",
+    class_name_property=RDFS.label,
     clean: bool = False,
     verbose: bool = True,
 ):
@@ -170,33 +219,40 @@ def create(
     param verbose: Whether to print verbose output.
     type verbose: bool
     """
-    ontology = owlready2.get_ontology(ontology_filepath).load()
-    with ontology:
-        base_class_obj = NewThing
+    if base_class_obj is not Thing:
+        assert class_template != os.path.join(
+            os.path.dirname(__file__), "templates", "class_template.txt"
+        ), "You must provide a new class template when setting a custom base class"
 
     template = Template(open(class_template, "r").read())
     template.template = "\n".join(template.template.splitlines() + ["", "", ""])
 
-    if scope is None:
-        # With no specified scope, start from the child classes of owl:Thing
-        thing_children = list(owlready2.Thing.subclasses())
-    else:
-        thing_children = scope
+    class_object_maker = ClassObjectMaker(
+        ontology_filepath=ontology_filepath,
+        destination_path=destination_path,
+        class_template=template,
+        class_name_property=class_name_property,
+    )
 
-    with tqdm(thing_children) as pbar:
-        for thing in thing_children:
-            if thing is not base_class_obj:
-                traverse_subclass(
-                    thing,
-                    make_class_dir,
-                    make_class_file,
-                    base_class_obj,
-                    destination_path,
-                    clean,
-                    template,
-                    class_name_property,
-                    ontology_filepath,
-                )
+    base_classes = class_object_maker.get_base_classes(scope)
+    base_class_class_obj = ClassObject(
+        uri="",
+        name=base_class_obj.__name__,
+        filename=base_class_obj.__name__,
+        label=base_class_obj.__name__,
+        isDefinedBy=base_class_obj.__doc__,
+        subclasses=[],
+    )
+
+    with tqdm(base_classes) as pbar:
+        for thing in base_classes:
+            traverse_subclass(
+                thing,
+                class_object_maker,
+                base_class_class_obj,
+                destination_path,
+                clean,
+            )
             if verbose:
                 pbar.update(1)
 
@@ -209,9 +265,6 @@ if __name__ == "__main__":
     parser.add_argument("ontology_filepath", type=str, help="Path to the ontology file")
     parser.add_argument(
         "destination_path", type=str, help="Path to the destination directory"
-    )
-    parser.add_argument(
-        "scope", type=list, default=[], help="List of class names to get subclasses of"
     )
     parser.add_argument(
         "class_template",
@@ -241,7 +294,6 @@ if __name__ == "__main__":
     create(
         ontology_filepath=args.ontology_filepath,
         destination_path=args.destination_path,
-        scope=args.scope,
         class_template=args.class_template,
         class_name_property=args.class_name_property,
         clean=args.clean,

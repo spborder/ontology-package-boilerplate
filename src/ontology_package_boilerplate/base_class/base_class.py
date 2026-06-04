@@ -8,16 +8,12 @@ import importlib
 import sys
 from uuid import uuid4
 
-from owlready2 import Thing
 
-
-class NewThing(Thing):
-    """Base class for PIFO entities. Provides access to key utility functions"""
-
-    equivalent_to = [Thing]
+class Thing:
+    """Base class for ontology entities. Provides access to key utility functions"""
 
     isDefinedBy = [
-        "Base class for PIFO entities. Provides access to key utility functions"
+        "Base class for ontology entities. Provides access to key utility functions"
     ]
 
     required_modules = []
