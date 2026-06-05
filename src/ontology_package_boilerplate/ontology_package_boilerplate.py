@@ -70,18 +70,24 @@ def traverse_subclass(
 
 
 ClassObject = namedtuple(
-    "ClassObject", ["uri", "name", "filename", "subclasses", "label", "isDefinedBy"]
+    "ClassObject", ["iri", "name", "filename", "subclasses", "label", "isDefinedBy"]
 )
 
 
 class ClassObjectMaker(Graph):
     def __init__(
-        self, ontology_filepath, destination_path, class_template, class_name_property
+        self,
+        ontology_filepath,
+        destination_path,
+        class_template,
+        template_header_lines,
+        class_name_property,
     ):
         super().__init__()
         self.ontology_filepath = ontology_filepath
         self.destination_path = destination_path
         self.class_template = class_template
+        self.template_header_lines = template_header_lines
         self.class_name_property = class_name_property
 
         self.parse(self.ontology_filepath)
@@ -122,18 +128,20 @@ class ClassObjectMaker(Graph):
         for prop in [RDFS.label, RDFS.isDefinedBy]:
             value = list(self.objects(subject=uri, predicate=prop))
             prop_name = re.split(URI_REGEX_SPLIT, str(prop))[-1]
-            attrs[prop_name] = value
+            attrs[prop_name] = [v.toPython() for v in value]
 
         cls_name = self.value(subject=uri, predicate=self.class_name_property)
         if cls_name is None:
             cls_name = re.split(URI_REGEX_SPLIT, (uri))[-1]
 
+        cls_name = self.make_file_name(cls_name)
+
         subclasses = list(self.subjects(predicate=RDFS.subClassOf, object=uri))
 
         cls_obj = ClassObject(
-            uri=uri,
+            iri=uri,
             name=cls_name,
-            filename=self.make_file_name(cls_name),
+            filename=cls_name,
             label=attrs.get("label"),
             isDefinedBy=attrs.get("isDefinedBy"),
             subclasses=subclasses,
@@ -171,6 +179,8 @@ class ClassObjectMaker(Graph):
             "parent_imports": parent_imports,
             "property_imports": "",
             "class_name": cls_object.name,
+            "label": cls_object.label,
+            "iri": str(cls_object.iri),
             "base_class": base_class.name,
             "docs": str(cls_object.isDefinedBy),
             "isDefinedBy": str(cls_object.isDefinedBy),
@@ -180,7 +190,12 @@ class ClassObjectMaker(Graph):
             template = self.class_template
         else:
             template = Template(
-                "\n".join(self.class_template.template.splitlines()[13:] + ["", "", ""])
+                "\n".join(
+                    self.class_template.template.splitlines()[
+                        self.template_header_lines :
+                    ]
+                    + ["", "", ""]
+                )
             )
 
         cls_file = template.substitute(cls_dict)
@@ -197,6 +212,7 @@ def create(
     class_template: str = os.path.join(
         os.path.dirname(__file__), "templates", "class_template.txt"
     ),
+    template_header_lines: int | None = None,
     class_name_property=RDFS.label,
     clean: bool = False,
     verbose: bool = True,
@@ -212,6 +228,8 @@ def create(
     type scope: list | None
     param class_template: Path to the class template file.
     type class_template: str
+    param template_header_lines: Number of lines to skip when appending to a class file. If not provided, the line containing the last import statement will be used.
+    type template_header_lines: int | None
     param class_name_property: Property to use as the class name.
     type class_name_property: str
     param clean: Whether to replace all existing files in the destination directory or skip them.
@@ -227,20 +245,28 @@ def create(
     template = Template(open(class_template, "r").read())
     template.template = "\n".join(template.template.splitlines() + ["", "", ""])
 
+    if template_header_lines is None:
+        template_lines = open(class_template, "r").readlines()
+        import_line_idx = [
+            idx for idx, line in enumerate(template_lines) if "import" in line
+        ]
+        template_header_lines = import_line_idx[-1]
+
     class_object_maker = ClassObjectMaker(
         ontology_filepath=ontology_filepath,
         destination_path=destination_path,
         class_template=template,
+        template_header_lines=template_header_lines,
         class_name_property=class_name_property,
     )
 
     base_classes = class_object_maker.get_base_classes(scope)
     base_class_class_obj = ClassObject(
-        uri="",
+        iri=getattr(base_class_obj, "iri", ""),
         name=base_class_obj.__name__,
         filename=base_class_obj.__name__,
-        label=base_class_obj.__name__,
-        isDefinedBy=base_class_obj.__doc__,
+        label=getattr(base_class_obj, "label", base_class_obj.__name__),
+        isDefinedBy=getattr(base_class_obj, "isDefinedBy", base_class_obj.__doc__),
         subclasses=[],
     )
 
